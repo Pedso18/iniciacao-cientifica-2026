@@ -1,0 +1,14 @@
+# Generated compilation artifacts and executables
+/target/
+
+# Log files and compiler stack dumps
+rustc-ice-*.txt
+
+# Cargo mutants mutation testing data
+**/mutants.out*/
+
+# Backup files from formatters or editors
+*.rs.bk
+
+# MSVC Windows build debugging files
+*.pdb
