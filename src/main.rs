@@ -1,4 +1,4 @@
-use std::{f32::consts::PI, num::NonZeroU32, time::Instant};
+use std::{array, f32::consts::PI, num::NonZeroU32, time::Instant};
 
 use femtovg::{renderer::OpenGl, Canvas, Color, Paint, Path};
 use glutin::{
@@ -17,6 +17,13 @@ use winit::{
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     window::{Window, WindowAttributes, WindowId},
 };
+
+const AMOUNT_OF_PARTICLES: i32 = 1000;
+
+const CENTER_SPAWN_X: f32 = 1.0;
+const X_AMPLITUDE: f32 = 0.1;
+const CENTER_SPAWN_Y: f32 = 0.5;
+const Y_AMPLITUDE: f32 = 0.2;
 
 #[derive(Clone, Copy, Debug)]
 struct Particle {
@@ -61,18 +68,58 @@ fn velocity_field(x: f32, y: f32, t: f32) -> (f32, f32){
     
 }
 
+fn deformation_gradient(x0: f32, y0: f32, t0: f32, t: f32) -> Vec<f32>{
+
+    let initial_x = CENTER_SPAWN_X - X_AMPLITUDE;
+    let final_x = CENTER_SPAWN_X + X_AMPLITUDE;
+
+    let initial_y = CENTER_SPAWN_Y - Y_AMPLITUDE;
+    let final_y = CENTER_SPAWN_Y + Y_AMPLITUDE;
+
+    let mut result = vec![f32::default(); 4];
+
+    let delta = ((final_x-initial_x)*(final_y-initial_y)/AMOUNT_OF_PARTICLES as f32).sqrt();
+
+    let dt = t - t0;
+
+    let vel0 = velocity_field(x0 + delta, y0, t0);
+    let vel1 = velocity_field(x0 - delta, y0, t0);
+    let vel2 = velocity_field(x0, y0 + delta, t0);
+    let vel3 = velocity_field(x0, y0 - delta, t0);
+
+    result[0] = (x0 + vel0.0 * dt - (x0 + vel1.0 * dt)) / (2.0 * delta.abs());
+    result[1] = (x0 + vel2.0 * dt - (x0 + vel3.0 * dt)) / (2.0 * delta.abs());
+    result[2] = (y0 + vel0.1 * dt - (y0 + vel1.1 * dt)) / (2.0 * delta.abs());
+    result[3] = (y0 + vel2.1* dt - (y0 + vel3.1 * dt)) / (2.0 * delta.abs());
+
+    return result;
+}
+
+fn cauchy_green_tensor(deformation_matrix: Vec<f32>) -> Vec<f32>{
+    let mut result = vec![f32::default(); 4];
+
+    result[0] = deformation_matrix[0] * deformation_matrix[0] + deformation_matrix[2] * deformation_matrix[2];
+    result[1] = deformation_matrix[0] * deformation_matrix[1] + deformation_matrix[2] * deformation_matrix[3];
+    result[2] = deformation_matrix[1] * deformation_matrix[0] + deformation_matrix[3] * deformation_matrix[2];
+    result[3] = deformation_matrix[1] * deformation_matrix[1] + deformation_matrix[3] * deformation_matrix[3];
+
+    return result;
+}
+
+fn compute_ftle(cauchy_green: Vec<f32>, dt:f32) -> f32{
+    let lambda2 = (cauchy_green[0] + cauchy_green[3] + ((cauchy_green[0] - cauchy_green[3]).powi(2) + 4.0*cauchy_green[1].powi(2)).sqrt())/2.0;
+    return (0.5 / dt.abs()) * lambda2.ln();
+}
+
 fn generate_initial_particles(amount:i32) -> Vec<Particle>{
 
     let mut particles =  vec![Particle::default(); amount as usize];
 
-    let x_dispersion = 0.1;
-    let y_dispersion = 0.2;
+    let initial_x = CENTER_SPAWN_X - X_AMPLITUDE;
+    let final_x = CENTER_SPAWN_X + X_AMPLITUDE;
 
-    let initial_x = 1.0 - x_dispersion;
-    let final_x = 1.0 + x_dispersion;
-
-    let initial_y = 0.5 - y_dispersion;
-    let final_y = 0.5 + y_dispersion;
+    let initial_y = CENTER_SPAWN_Y - Y_AMPLITUDE;
+    let final_y = CENTER_SPAWN_Y + Y_AMPLITUDE;
 
     let mut increment_x = 0.0;
     let mut increment_y = 0.0;
@@ -91,6 +138,77 @@ fn generate_initial_particles(amount:i32) -> Vec<Particle>{
 
     return particles;
     
+}
+
+fn turbo_heat_map(t: f32, max: f32) -> (u8, u8, u8){
+  // Clamp t to [0, 1]
+  let t = t / max;
+
+    // Approximate component curves
+    let r = (1.5 - (4.0 * t - 3.0).abs()).clamp(0.0, 1.0);
+    let g = (1.5 - (4.0 * t - 2.0).abs()).clamp(0.0, 1.0);
+    let b = (1.5 - (4.0 * t - 1.0).abs()).clamp(0.0, 1.0);
+
+    return(
+        (r * 255.0).round() as u8,
+        (g * 255.0).round() as u8,
+        (b * 255.0).round() as u8,
+    )
+}
+
+fn draw_deformation_gradient(canvas: &mut Canvas<OpenGl>, t: f32, t0: f32){
+
+    let initial_x = CENTER_SPAWN_X - X_AMPLITUDE;
+    let final_x = CENTER_SPAWN_X + X_AMPLITUDE;
+
+    let initial_y = CENTER_SPAWN_Y - Y_AMPLITUDE;
+    let final_y = CENTER_SPAWN_Y + Y_AMPLITUDE;
+
+    let mut increment_x = 0.0;
+    let mut increment_y = 0.0;
+
+    let distance_between_particles = ((final_x-initial_x)*(final_y-initial_y)/AMOUNT_OF_PARTICLES as f32).sqrt();
+
+    let mut deformation_values = vec![f32::default(); AMOUNT_OF_PARTICLES as usize];
+    let mut biggest_value: f32 = 0.0;
+
+    for value in &mut deformation_values{
+        let x0  = initial_x + increment_x as f32;
+        increment_x += distance_between_particles;
+        let y0 = initial_y + increment_y as f32;
+        if initial_x + increment_x > final_x {
+            increment_x = 0.0;
+            increment_y += distance_between_particles;
+        }
+
+        (*value) = compute_ftle(cauchy_green_tensor(deformation_gradient(x0, y0, t0, t)), t - t0);
+        if *value > biggest_value {
+            biggest_value = *value;
+        }
+    }
+
+    increment_x = 0.0;
+    increment_y = 0.0;
+
+    let mut pos_x = initial_x;
+    let mut pos_y = initial_y;
+    for deformation_value in deformation_values{
+
+        let mut square = Path::new();
+        square.rect((pos_x - distance_between_particles/2.0)*150.0 + 50.0, (pos_y -distance_between_particles/2.0)*150.0 + 50.0, distance_between_particles * 150.0, distance_between_particles * 150.0);
+        let rgb_values = turbo_heat_map(deformation_value, biggest_value);
+        let stroke_paint = Paint::color(Color::rgb(rgb_values.0, rgb_values.1, rgb_values.2));
+        canvas.fill_path(&square, &stroke_paint);
+
+        pos_x = initial_x + increment_x as f32;
+        increment_x += distance_between_particles;
+        pos_y = initial_y + increment_y as f32;
+        if initial_x + increment_x > final_x {
+            increment_x = 0.0;
+            increment_y += distance_between_particles;
+        }
+    }
+
 }
 
 
@@ -156,7 +274,7 @@ impl ApplicationHandler for App {
             gl_context,
             canvas,
             color: 0,
-            particles: generate_initial_particles(50),
+            particles: generate_initial_particles(AMOUNT_OF_PARTICLES),
             last_frame: Instant::now(),
             app_start: Instant::now()
         });
@@ -189,18 +307,20 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
                 let dt = (now - state.last_frame).as_secs_f32();
+                
                 state.last_frame = now;
 
                 let size = state.window.inner_size();
                 let scale = state.window.scale_factor() as f32;
-
+                
                 state.canvas.set_size(size.width, size.height, scale);
                 state.canvas.clear_rect(0, 0, size.width, size.height, Color::rgb(25, 25, 30));
 
-
-                // 2. Draw particles and update position
-
                 
+                // 2. Draw particles and update position
+                draw_deformation_gradient(&mut state.canvas, state.app_start.elapsed().as_secs_f32(), 0.0);
+                
+
                 for particle in &mut state.particles {
                     
                     let mut circle = Path::new();
