@@ -1,4 +1,4 @@
-use std::{array, f32::consts::PI, num::NonZeroU32, time::Instant};
+use std::{f32::consts::PI, num::NonZeroU32, time::Instant};
 
 use femtovg::{Canvas, Color, Paint, Path, renderer::OpenGl};
 use glutin::{
@@ -19,14 +19,15 @@ use winit::{
 };
 
 const AMOUNT_OF_PARTICLES: i32 = 1000;
-const AMOUNT_OF_GRADIENT_CELLS: i32 = 1000;
-const GRID_COLS: f32 = 40.0;
-const GRID_ROWS: f32 = 20.0;
+const GRID_COLS: f32 = 80.0;
+const GRID_ROWS: f32 = GRID_COLS/2.0;
 
 const CENTER_SPAWN_X: f32 = 1.0;
-const X_AMPLITUDE: f32 = 0.1;
+const X_AMPLITUDE: f32 = 0.9;
 const CENTER_SPAWN_Y: f32 = 0.5;
-const Y_AMPLITUDE: f32 = 0.2;
+const Y_AMPLITUDE: f32 = 0.45;
+
+const TIME_BETWEEN_SAMPLES: f32 = 0.1; //in seconds
 
 #[derive(Clone, Copy, Debug)]
 struct Particle {
@@ -270,7 +271,7 @@ fn precompute_ftle_grid(t0: f32, t_f: f32) -> Vec<FtleCell> {
 
     cells
 }
-
+/*
 fn draw_deformation_gradient(canvas: &mut Canvas<OpenGl>, t: f32, t0: f32) {
     let initial_x = -0.25;
     let final_x = 2.25;
@@ -331,7 +332,7 @@ fn draw_deformation_gradient(canvas: &mut Canvas<OpenGl>, t: f32, t0: f32) {
         }
     }
 }
-
+*/
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_some() {
@@ -425,10 +426,14 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                let now = Instant::now();
-                let dt = (now - state.last_frame).as_secs_f32();
+                
+                let dt = TIME_BETWEEN_SAMPLES;
+                
+                // descomentar para intervalos contínuos durante a execução
+                // let now = Instant::now();
+                // let dt = (now - state.last_frame).as_secs_f32();
+                // state.last_frame = now;
 
-                state.last_frame = now;
 
                 let size = state.window.inner_size();
                 let scale = state.window.scale_factor() as f32;
@@ -436,7 +441,7 @@ impl ApplicationHandler for App {
                 state.canvas.set_size(size.width, size.height, scale);
                 state
                     .canvas
-                    .clear_rect(0, 0, size.width, size.height, Color::rgb(25, 25, 30));
+                    .clear_rect(0, 0, size.width, size.height, Color::rgb(150, 150, 150));
 
                 // 2. Draw particles and update position
                 //draw_deformation_gradient(&mut state.canvas, state.app_start.elapsed().as_secs_f32(), 0.0);
@@ -460,7 +465,7 @@ impl ApplicationHandler for App {
                     let mut circle = Path::new();
                     circle.circle(particle.x * 150.0 + 50.0, particle.y * 150.0 + 50.0, 0.001);
                     // let mut stroke_paint = Paint::color(Color::rgb((particle.x / 2.0 * 255.0) as u8, (particle.y / 1.0 * 255.0) as u8, 125));
-                    let mut stroke_paint = Paint::color(Color::rgb(82, 82, 255));
+                    let mut stroke_paint = Paint::color(Color::rgb(255, 255, 255));
                     stroke_paint.set_line_width(5.0);
                     state.canvas.stroke_path(&mut circle, &stroke_paint);
 
