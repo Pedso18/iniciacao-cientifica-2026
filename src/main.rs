@@ -1,4 +1,4 @@
-use std::{f32::consts::PI, num::NonZeroU32, time::Instant};
+use std::{f32::consts::PI, num::NonZeroU32};
 
 use femtovg::{Canvas, Color, ImageFlags, ImageId, Paint, Path, RenderTarget, renderer::OpenGl};
 use glutin::{
@@ -10,6 +10,7 @@ use glutin::{
 };
 use glutin_winit::{DisplayBuilder, GlWindow};
 use raw_window_handle::HasWindowHandle;
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -40,7 +41,7 @@ const GRID_CALC_T0: f32 = 0.0;
 const GRID_CALC_TF: f32 = 10.0;
 
 const DYNAMIC_FTLE: bool = true;
-const FTLE_PERIOD: f32 = 10.0;
+const FTLE_PERIOD: f32 = 10.0; //depende da função fluxo que estamos utilizando
 const TIME_PER_FTLE: f32 = 0.1;
 
 //simulation settings
@@ -51,6 +52,7 @@ struct Particle {
     x: f32,
     y: f32,
 }
+#[derive(Clone, Copy, Debug)]
 struct FtleCell {
     screen_x: f32,
     screen_y: f32,
@@ -72,8 +74,6 @@ struct AppState {
     canvas: Canvas<OpenGl>,
     color: u8,
     particles: Vec<Particle>,
-    last_frame: Instant,
-    app_start: Instant,
     current_time: f32,
     ftle_cells_imgs: Vec<femtovg::ImageId>,
 }
@@ -102,6 +102,7 @@ fn velocity_field(x: f32, y: f32, t: f32) -> (f32, f32) {
 }
 
 fn rk4_advect(mut x: f32, mut y: f32, mut t: f32, t_end: f32, steps: usize) -> (f32, f32) {
+
     if steps == 0 || (t_end - t).abs() < 1e-6 {
         return (x, y);
     }
@@ -122,38 +123,13 @@ fn rk4_advect(mut x: f32, mut y: f32, mut t: f32, t_end: f32, steps: usize) -> (
 }
 
 fn deformation_gradient(x0: f32, y0: f32, t0: f32, t: f32) -> [f32; 4] {
-    /* minha versão que era meio bosta
-    let initial_x = CENTER_SPAWN_X - X_AMPLITUDE;
-    let final_x = CENTER_SPAWN_X + X_AMPLITUDE;
-
-    let initial_y = CENTER_SPAWN_Y - Y_AMPLITUDE;
-    let final_y = CENTER_SPAWN_Y + Y_AMPLITUDE;
-
-    let mut result = [f32::default(); 4];
-
-    let delta = ((final_x-initial_x)*(final_y-initial_y)/AMOUNT_OF_GRADIENT_CELLS as f32).sqrt();
-
-    let dt = t - t0;
-
-    let vel0 = velocity_field(x0 + delta, y0, t0);
-    let vel1 = velocity_field(x0 - delta, y0, t0);
-    let vel2 = velocity_field(x0, y0 + delta, t0);
-    let vel3 = velocity_field(x0, y0 - delta, t0);
-
-    result[0] = (x0 + vel0.0 * dt - (x0 + vel1.0 * dt)) / (2.0 * delta.abs());
-    result[1] = (x0 + vel2.0 * dt - (x0 + vel3.0 * dt)) / (2.0 * delta.abs());
-    result[2] = (y0 + vel0.1 * dt - (y0 + vel1.1 * dt)) / (2.0 * delta.abs());
-    result[3] = (y0 + vel2.1* dt - (y0 + vel3.1 * dt)) / (2.0 * delta.abs());
-
-    return result;
-    */
     let delta = 1e-4; // perturbação infinitesimal controlada
     let steps = ((t - t0).abs() * 20.0).max(10.0) as usize;
 
-    let (px_plus, py_plus) = rk4_advect(x0 + delta, y0, t0, t, steps);
-    let (px_minus, py_minus) = rk4_advect(x0 - delta, y0, t0, t, steps);
-    let (qx_plus, qy_plus) = rk4_advect(x0, y0 + delta, t0, t, steps);
-    let (qx_minus, qy_minus) = rk4_advect(x0, y0 - delta, t0, t, steps);
+    let (px_plus, py_plus) = rk4_advect(x0 + delta, y0, t0, t, steps); //+delta no x
+    let (px_minus, py_minus) = rk4_advect(x0 - delta, y0, t0, t, steps); //-delta no x
+    let (qx_plus, qy_plus) = rk4_advect(x0, y0 + delta, t0, t, steps); //+delta no y
+    let (qx_minus, qy_minus) = rk4_advect(x0, y0 - delta, t0, t, steps);//-delta no y
 
     let two_delta = 2.0 * delta;
 
@@ -243,10 +219,9 @@ fn precompute_ftle_grid(t0: f32, t_f: f32) -> Vec<FtleCell> {
 
     let dx = (x_max - x_min) / GRID_COLS as f32;
     let dy = (y_max - y_min) / GRID_ROWS as f32;
+    
+    let mut cells = vec![FtleCell{screen_x:0.0, screen_y:0.0, cell_w:0.0, cell_h:0.0, color:(0,0,0)}; (GRID_ROWS*GRID_COLS) as usize];
 
-    let mut values = vec![0.0; (GRID_COLS * GRID_ROWS) as usize];
-
-    let mut counter = 0;
     for row in 0..GRID_ROWS as i32 {
         let y = y_min + (row as f32 + 0.5) * dy;
         for col in 0..GRID_COLS as i32 {
@@ -256,103 +231,19 @@ fn precompute_ftle_grid(t0: f32, t_f: f32) -> Vec<FtleCell> {
             let cg = cauchy_green_tensor(grad);
             let ftle = compute_ftle(cg, t_f - t0);
 
-            let idx = row * GRID_COLS as i32 + col;
-            values[idx as usize] = ftle;
-            counter += 1;
-
-            if counter % 1000 == 0 {
-                println!(
-                    "precompute process is now {:.2}% done",
-                    counter as f32 / (GRID_COLS * GRID_ROWS) * 100.0
-                );
-            }
-        }
-    }
-
-    println!("FTLE concluído. Maior valor encontrado: {:.4}", FTLE_DISPLAY_COLOR_MAX);
-
-    let mut cells = Vec::with_capacity((GRID_COLS * GRID_ROWS) as usize);
-
-    for row in 0..(GRID_ROWS as i32) {
-        let y = y_min + row as f32 * dy;
-        for col in 0..(GRID_COLS as i32) {
-            let x = x_min + col as f32 * dx;
-            let val = values[(row * GRID_COLS as i32 + col) as usize];
-
-            cells.push(FtleCell {
+            cells[(row*GRID_COLS as i32 + col) as usize] = FtleCell {
                 screen_x: x * ZOOM_SCALE + DISPLAY_OFFSET_X,
                 screen_y: y * ZOOM_SCALE + DISPLAY_OFFSET_Y,
                 cell_w: dx * ZOOM_SCALE,
                 cell_h: dy * ZOOM_SCALE,
-                color: turbo_heat_map(val, FTLE_DISPLAY_COLOR_MAX),
-            });
+                color: turbo_heat_map(ftle, FTLE_DISPLAY_COLOR_MAX),
+            };
+            
         }
     }
-
     cells
 }
-/*
-fn draw_deformation_gradient(canvas: &mut Canvas<OpenGl>, t: f32, t0: f32) {
-    let initial_x = -0.25;
-    let final_x = 2.25;
 
-    let initial_y = -0.25;
-    let final_y = 1.25;
-
-    let mut increment_x = 0.0;
-    let mut increment_y = 0.0;
-
-    let distance_between_particles =
-        ((final_x - initial_x) * (final_y - initial_y) / AMOUNT_OF_GRADIENT_CELLS as f32).sqrt();
-
-    let mut deformation_values = vec![f32::default(); AMOUNT_OF_GRADIENT_CELLS as usize];
-    let mut biggest_value: f32 = 0.0;
-
-    for value in &mut deformation_values {
-        let x0 = initial_x + increment_x as f32;
-        increment_x += distance_between_particles;
-        let y0 = initial_y + increment_y as f32;
-        if initial_x + increment_x > final_x {
-            increment_x = 0.0;
-            increment_y += distance_between_particles;
-        }
-
-        (*value) = compute_ftle(
-            cauchy_green_tensor(deformation_gradient(x0, y0, t0, t)),
-            t - t0,
-        );
-        if *value > biggest_value {
-            biggest_value = *value;
-        }
-    }
-
-    increment_x = 0.0;
-    increment_y = 0.0;
-
-    let mut pos_x = initial_x;
-    let mut pos_y = initial_y;
-    for deformation_value in deformation_values {
-        let mut square = Path::new();
-        square.rect(
-            (pos_x - distance_between_particles / 2.0) * ZOOM_SCALE + DISPLAY_OFFSET_X,
-            (pos_y - distance_between_particles / 2.0) * ZOOM_SCALE + DISPLAY_OFFSET_Y,
-            distance_between_particles * ZOOM_SCALE,
-            distance_between_particles * ZOOM_SCALE,
-        );
-        let rgb_values = turbo_heat_map(deformation_value, biggest_value);
-        let stroke_paint = Paint::color(Color::rgb(rgb_values.0, rgb_values.1, rgb_values.2));
-        canvas.fill_path(&square, &stroke_paint);
-
-        pos_x = initial_x + increment_x as f32;
-        increment_x += distance_between_particles;
-        pos_y = initial_y + increment_y as f32;
-        if initial_x + increment_x > final_x {
-            increment_x = 0.0;
-            increment_y += distance_between_particles;
-        }
-    }
-}
-*/
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_some() {
@@ -415,6 +306,17 @@ impl ApplicationHandler for App {
         let mut cached_img_ids: Vec<ImageId> = vec![];
 
         if DYNAMIC_FTLE {
+
+            let mut every_grid_ftle_cells = vec![vec![FtleCell{screen_x:0.0, screen_y:0.0, cell_w:0.0, cell_h:0.0, color:(0,0,0)}; (GRID_ROWS * GRID_COLS) as usize]; (FTLE_PERIOD / TIME_PER_FTLE) as usize];
+
+            every_grid_ftle_cells.par_iter_mut().enumerate().for_each(|(i, ftle_cell_grid)|{
+                (*ftle_cell_grid) = precompute_ftle_grid(
+                    GRID_CALC_T0 + TIME_PER_FTLE * i as f32,
+                    GRID_CALC_TF + TIME_PER_FTLE * i as f32,
+                );
+                println!("precomputed the {} of {} ftle!", i, FTLE_PERIOD / TIME_PER_FTLE);
+            });
+
             for i in 0..(FTLE_PERIOD / TIME_PER_FTLE) as i32 {
                 let cache_image_id = canvas
                     .create_image_empty(
@@ -439,10 +341,7 @@ impl ApplicationHandler for App {
 
                 // 3. Draw ftle static squares
 
-                let ftle_cells = precompute_ftle_grid(
-                    GRID_CALC_T0 + TIME_PER_FTLE * i as f32,
-                    GRID_CALC_TF + TIME_PER_FTLE * i as f32,
-                );
+                let ftle_cells = &every_grid_ftle_cells[i as usize];
 
                 for ftle_cell in ftle_cells {
                     let mut square = Path::new();
@@ -516,8 +415,6 @@ impl ApplicationHandler for App {
             canvas,
             color: 0,
             particles: generate_initial_particles(AMOUNT_OF_PARTICLES),
-            last_frame: Instant::now(),
-            app_start: Instant::now(),
             ftle_cells_imgs: cached_img_ids,
             current_time: 0.0,
         });
@@ -550,11 +447,6 @@ impl ApplicationHandler for App {
                 let dt = TIME_BETWEEN_SAMPLES;
                 state.current_time += dt;
 
-                // descomentar para intervalos contínuos durante a execução
-                // let now = Instant::now();
-                // let dt = (now - state.last_frame).as_secs_f32();
-                // state.last_frame = now;
-
                 let size = state.window.inner_size();
                 let scale = state.window.scale_factor() as f32;
 
@@ -564,7 +456,6 @@ impl ApplicationHandler for App {
                     .clear_rect(0, 0, size.width, size.height, Color::rgb(150, 150, 150));
 
                 // 2. Draw particles and update position
-                //draw_deformation_gradient(&mut state.canvas, state.app_start.elapsed().as_secs_f32(), 0.0);
                 let ftle_img_paint;
                 if DYNAMIC_FTLE {
                     ftle_img_paint = Paint::image(
