@@ -1,6 +1,6 @@
 use std::{f32::consts::PI, num::NonZeroU32, time::Instant};
 
-use femtovg::{Canvas, Color, Paint, Path, renderer::OpenGl};
+use femtovg::{Canvas, Color, ImageFlags, Paint, Path, RenderTarget, renderer::OpenGl};
 use glutin::{
     config::ConfigTemplateBuilder,
     context::{ContextAttributesBuilder, PossiblyCurrentContext},
@@ -26,15 +26,15 @@ const DISPLAY_WIDTH: f32 = ZOOM_SCALE / 150.0 * 400.0;
 const DISPLAY_HEIGHT: f32 = ZOOM_SCALE / 150.0 * 250.0;
 
 //particle settings
-const AMOUNT_OF_PARTICLES: i32 = 50000;
+const AMOUNT_OF_PARTICLES: i32 = 1000;
 const CENTER_SPAWN_X: f32 = 1.0;
 const X_AMPLITUDE: f32 = 1.0;
 const CENTER_SPAWN_Y: f32 = 0.5;
 const Y_AMPLITUDE: f32 = 0.5;
 
 //ftle settings
-const GRID_COLS: f32 = 50.0;
-const GRID_ROWS: f32 = GRID_COLS/2.0;
+const GRID_COLS: f32 = 200.0;
+const GRID_ROWS: f32 = GRID_COLS / 2.0;
 const GRID_CALC_T0: f32 = 0.0;
 const GRID_CALC_TF: f32 = 10.0;
 
@@ -69,7 +69,7 @@ struct AppState {
     particles: Vec<Particle>,
     last_frame: Instant,
     app_start: Instant,
-    ftle_cells: Vec<FtleCell>,
+    ftle_cells_img: femtovg::ImageId,
 }
 
 #[derive(Default)]
@@ -259,7 +259,10 @@ fn precompute_ftle_grid(t0: f32, t_f: f32) -> Vec<FtleCell> {
             counter += 1;
 
             if counter % 1000 == 0 {
-                println!("precompute process is now {:.2}% done", counter as f32/(GRID_COLS*GRID_ROWS)*100.0);
+                println!(
+                    "precompute process is now {:.2}% done",
+                    counter as f32 / (GRID_COLS * GRID_ROWS) * 100.0
+                );
             }
         }
     }
@@ -402,7 +405,50 @@ impl ApplicationHandler for App {
                 .expect("Cannot create OpenGl renderer")
         };
 
-        let canvas = Canvas::new(renderer).expect("Cannot create Canvas");
+        let mut canvas = Canvas::new(renderer).expect("Cannot create Canvas");
+
+        let cache_width = DISPLAY_WIDTH as usize;
+        let cache_height = DISPLAY_HEIGHT as usize;
+
+        let cache_image_id = canvas
+            .create_image_empty(
+                cache_width,
+                cache_height,
+                femtovg::PixelFormat::Rgba8,
+                ImageFlags::empty(), // or ImageFlags::empty()
+            )
+            .expect("Failed to create offscreen image");
+
+        // 1. Direct drawing to the off-screen image
+        canvas.set_render_target(RenderTarget::Image(cache_image_id));
+
+        // 2. Clear the target
+        canvas.clear_rect(
+            0,
+            0,
+            cache_width as u32,
+            cache_height as u32,
+            femtovg::Color::rgba(0, 0, 0, 0),
+        );
+
+        // 3. Draw ftle static squares
+        let ftle_cells = precompute_ftle_grid(GRID_CALC_T0, GRID_CALC_TF);
+
+        for ftle_cell in ftle_cells {
+            let mut square = Path::new();
+            square.rect(
+                ftle_cell.screen_x,
+                ftle_cell.screen_y,
+                ftle_cell.cell_w,
+                ftle_cell.cell_h,
+            );
+            let rgb_values = ftle_cell.color;
+            let stroke_paint = Paint::color(Color::rgb(rgb_values.0, rgb_values.1, rgb_values.2));
+            canvas.fill_path(&square, &stroke_paint);
+        }
+
+        // 4. Switch back to the main display
+        canvas.set_render_target(RenderTarget::Screen);
 
         self.state = Some(AppState {
             window,
@@ -413,7 +459,7 @@ impl ApplicationHandler for App {
             particles: generate_initial_particles(AMOUNT_OF_PARTICLES),
             last_frame: Instant::now(),
             app_start: Instant::now(),
-            ftle_cells: precompute_ftle_grid(GRID_CALC_T0, GRID_CALC_TF),
+            ftle_cells_img: cache_image_id,
         });
     }
 
@@ -441,14 +487,12 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                
                 let dt = TIME_BETWEEN_SAMPLES;
-                
+
                 // descomentar para intervalos contínuos durante a execução
                 // let now = Instant::now();
                 // let dt = (now - state.last_frame).as_secs_f32();
                 // state.last_frame = now;
-
 
                 let size = state.window.inner_size();
                 let scale = state.window.scale_factor() as f32;
@@ -460,25 +504,19 @@ impl ApplicationHandler for App {
 
                 // 2. Draw particles and update position
                 //draw_deformation_gradient(&mut state.canvas, state.app_start.elapsed().as_secs_f32(), 0.0);
-                for ftle_cell in &mut state.ftle_cells {
-                    let mut square = Path::new();
-                    square.rect(
-                        ftle_cell.screen_x,
-                        ftle_cell.screen_y,
-                        ftle_cell.cell_w,
-                        ftle_cell.cell_h,
-                    );
-                    let rgb_values = ftle_cell.color;
-                    let stroke_paint =
-                        Paint::color(Color::rgb(rgb_values.0, rgb_values.1, rgb_values.2));
-                        state.canvas.fill_path(&square, &stroke_paint);
-                    
-                }
-                
+                let ftle_img_paint = Paint::image(state.ftle_cells_img, 0.0, 0.0, DISPLAY_WIDTH, DISPLAY_HEIGHT, 0.0, 1.0);
+
+                let mut ftle_rect = Path::new();
+                ftle_rect.rect(0.0, 0.0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+                state.canvas.fill_path(&ftle_rect, &ftle_img_paint);
 
                 for particle in &mut state.particles {
                     let mut circle = Path::new();
-                    circle.circle(particle.x * ZOOM_SCALE + DISPLAY_OFFSET_X, particle.y * ZOOM_SCALE + DISPLAY_OFFSET_Y, 0.001);
+                    circle.circle(
+                        particle.x * ZOOM_SCALE + DISPLAY_OFFSET_X,
+                        particle.y * ZOOM_SCALE + DISPLAY_OFFSET_Y,
+                        0.001,
+                    );
                     // let mut stroke_paint = Paint::color(Color::rgb((particle.x / 2.0 * 255.0) as u8, (particle.y / 1.0 * 255.0) as u8, 125));
                     let mut stroke_paint = Paint::color(Color::rgb(255, 255, 255));
                     stroke_paint.set_line_width(5.0);
