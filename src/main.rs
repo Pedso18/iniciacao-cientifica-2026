@@ -1,6 +1,6 @@
 use std::{f32::consts::PI, num::NonZeroU32, time::Instant};
 
-use femtovg::{Canvas, Color, ImageFlags, Paint, Path, RenderTarget, renderer::OpenGl};
+use femtovg::{Canvas, Color, ImageFlags, ImageId, Paint, Path, RenderTarget, renderer::OpenGl};
 use glutin::{
     config::ConfigTemplateBuilder,
     context::{ContextAttributesBuilder, PossiblyCurrentContext},
@@ -24,6 +24,7 @@ const DISPLAY_OFFSET_X: f32 = ZOOM_SCALE / 3.0;
 const DISPLAY_OFFSET_Y: f32 = ZOOM_SCALE / 3.0;
 const DISPLAY_WIDTH: f32 = ZOOM_SCALE / 150.0 * 400.0;
 const DISPLAY_HEIGHT: f32 = ZOOM_SCALE / 150.0 * 250.0;
+const FTLE_DISPLAY_COLOR_MAX: f32 = 0.5;
 
 //particle settings
 const AMOUNT_OF_PARTICLES: i32 = 1000;
@@ -33,10 +34,14 @@ const CENTER_SPAWN_Y: f32 = 0.5;
 const Y_AMPLITUDE: f32 = 0.5;
 
 //ftle settings
-const GRID_COLS: f32 = 200.0;
+const GRID_COLS: f32 = 80.0;
 const GRID_ROWS: f32 = GRID_COLS / 2.0;
 const GRID_CALC_T0: f32 = 0.0;
 const GRID_CALC_TF: f32 = 10.0;
+
+const DYNAMIC_FTLE: bool = true;
+const FTLE_PERIOD: f32 = 10.0;
+const TIME_PER_FTLE: f32 = 0.1;
 
 //simulation settings
 const TIME_BETWEEN_SAMPLES: f32 = 0.1; //in seconds
@@ -69,7 +74,8 @@ struct AppState {
     particles: Vec<Particle>,
     last_frame: Instant,
     app_start: Instant,
-    ftle_cells_img: femtovg::ImageId,
+    current_time: f32,
+    ftle_cells_imgs: Vec<femtovg::ImageId>,
 }
 
 #[derive(Default)]
@@ -239,7 +245,6 @@ fn precompute_ftle_grid(t0: f32, t_f: f32) -> Vec<FtleCell> {
     let dy = (y_max - y_min) / GRID_ROWS as f32;
 
     let mut values = vec![0.0; (GRID_COLS * GRID_ROWS) as usize];
-    let mut max_val: f32 = 0.0;
 
     let mut counter = 0;
     for row in 0..GRID_ROWS as i32 {
@@ -253,9 +258,6 @@ fn precompute_ftle_grid(t0: f32, t_f: f32) -> Vec<FtleCell> {
 
             let idx = row * GRID_COLS as i32 + col;
             values[idx as usize] = ftle;
-            if ftle > max_val {
-                max_val = ftle;
-            }
             counter += 1;
 
             if counter % 1000 == 0 {
@@ -267,7 +269,7 @@ fn precompute_ftle_grid(t0: f32, t_f: f32) -> Vec<FtleCell> {
         }
     }
 
-    println!("FTLE concluído. Maior valor encontrado: {:.4}", max_val);
+    println!("FTLE concluído. Maior valor encontrado: {:.4}", FTLE_DISPLAY_COLOR_MAX);
 
     let mut cells = Vec::with_capacity((GRID_COLS * GRID_ROWS) as usize);
 
@@ -282,7 +284,7 @@ fn precompute_ftle_grid(t0: f32, t_f: f32) -> Vec<FtleCell> {
                 screen_y: y * ZOOM_SCALE + DISPLAY_OFFSET_Y,
                 cell_w: dx * ZOOM_SCALE,
                 cell_h: dy * ZOOM_SCALE,
-                color: turbo_heat_map(val, max_val),
+                color: turbo_heat_map(val, FTLE_DISPLAY_COLOR_MAX),
             });
         }
     }
@@ -410,41 +412,98 @@ impl ApplicationHandler for App {
         let cache_width = DISPLAY_WIDTH as usize;
         let cache_height = DISPLAY_HEIGHT as usize;
 
-        let cache_image_id = canvas
-            .create_image_empty(
-                cache_width,
-                cache_height,
-                femtovg::PixelFormat::Rgba8,
-                ImageFlags::empty(), // or ImageFlags::empty()
-            )
-            .expect("Failed to create offscreen image");
+        let mut cached_img_ids: Vec<ImageId> = vec![];
 
-        // 1. Direct drawing to the off-screen image
-        canvas.set_render_target(RenderTarget::Image(cache_image_id));
+        if DYNAMIC_FTLE {
+            for i in 0..(FTLE_PERIOD / TIME_PER_FTLE) as i32 {
+                let cache_image_id = canvas
+                    .create_image_empty(
+                        cache_width,
+                        cache_height,
+                        femtovg::PixelFormat::Rgba8,
+                        ImageFlags::empty(), // or ImageFlags::empty()
+                    )
+                    .expect("Failed to create offscreen image");
 
-        // 2. Clear the target
-        canvas.clear_rect(
-            0,
-            0,
-            cache_width as u32,
-            cache_height as u32,
-            femtovg::Color::rgba(0, 0, 0, 0),
-        );
+                // 1. Direct drawing to the off-screen image
+                canvas.set_render_target(RenderTarget::Image(cache_image_id));
 
-        // 3. Draw ftle static squares
-        let ftle_cells = precompute_ftle_grid(GRID_CALC_T0, GRID_CALC_TF);
+                // 2. Clear the target
+                canvas.clear_rect(
+                    0,
+                    0,
+                    cache_width as u32,
+                    cache_height as u32,
+                    femtovg::Color::rgba(0, 0, 0, 0),
+                );
 
-        for ftle_cell in ftle_cells {
-            let mut square = Path::new();
-            square.rect(
-                ftle_cell.screen_x,
-                ftle_cell.screen_y,
-                ftle_cell.cell_w,
-                ftle_cell.cell_h,
+                // 3. Draw ftle static squares
+
+                let ftle_cells = precompute_ftle_grid(
+                    GRID_CALC_T0 + TIME_PER_FTLE * i as f32,
+                    GRID_CALC_TF + TIME_PER_FTLE * i as f32,
+                );
+
+                for ftle_cell in ftle_cells {
+                    let mut square = Path::new();
+                    square.rect(
+                        ftle_cell.screen_x,
+                        ftle_cell.screen_y,
+                        ftle_cell.cell_w,
+                        ftle_cell.cell_h,
+                    );
+                    let rgb_values = ftle_cell.color;
+                    let stroke_paint =
+                        Paint::color(Color::rgb(rgb_values.0, rgb_values.1, rgb_values.2));
+                    canvas.fill_path(&square, &stroke_paint);
+                }
+                cached_img_ids.push(cache_image_id);
+                println!(
+                    "ftle image {} of {} calculated!",
+                    i + 1,
+                    FTLE_PERIOD as f32 / TIME_PER_FTLE
+                );
+            }
+        } else {
+            let cache_image_id = canvas
+                .create_image_empty(
+                    cache_width,
+                    cache_height,
+                    femtovg::PixelFormat::Rgba8,
+                    ImageFlags::empty(), // or ImageFlags::empty()
+                )
+                .expect("Failed to create offscreen image");
+
+            // 1. Direct drawing to the off-screen image
+            canvas.set_render_target(RenderTarget::Image(cache_image_id));
+
+            // 2. Clear the target
+            canvas.clear_rect(
+                0,
+                0,
+                cache_width as u32,
+                cache_height as u32,
+                femtovg::Color::rgba(0, 0, 0, 0),
             );
-            let rgb_values = ftle_cell.color;
-            let stroke_paint = Paint::color(Color::rgb(rgb_values.0, rgb_values.1, rgb_values.2));
-            canvas.fill_path(&square, &stroke_paint);
+
+            // 3. Draw ftle static squares
+
+            let ftle_cells = precompute_ftle_grid(GRID_CALC_T0, GRID_CALC_TF);
+
+            for ftle_cell in ftle_cells {
+                let mut square = Path::new();
+                square.rect(
+                    ftle_cell.screen_x,
+                    ftle_cell.screen_y,
+                    ftle_cell.cell_w,
+                    ftle_cell.cell_h,
+                );
+                let rgb_values = ftle_cell.color;
+                let stroke_paint =
+                    Paint::color(Color::rgb(rgb_values.0, rgb_values.1, rgb_values.2));
+                canvas.fill_path(&square, &stroke_paint);
+            }
+            cached_img_ids.push(cache_image_id);
         }
 
         // 4. Switch back to the main display
@@ -459,7 +518,8 @@ impl ApplicationHandler for App {
             particles: generate_initial_particles(AMOUNT_OF_PARTICLES),
             last_frame: Instant::now(),
             app_start: Instant::now(),
-            ftle_cells_img: cache_image_id,
+            ftle_cells_imgs: cached_img_ids,
+            current_time: 0.0,
         });
     }
 
@@ -488,6 +548,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 let dt = TIME_BETWEEN_SAMPLES;
+                state.current_time += dt;
 
                 // descomentar para intervalos contínuos durante a execução
                 // let now = Instant::now();
@@ -504,7 +565,29 @@ impl ApplicationHandler for App {
 
                 // 2. Draw particles and update position
                 //draw_deformation_gradient(&mut state.canvas, state.app_start.elapsed().as_secs_f32(), 0.0);
-                let ftle_img_paint = Paint::image(state.ftle_cells_img, 0.0, 0.0, DISPLAY_WIDTH, DISPLAY_HEIGHT, 0.0, 1.0);
+                let ftle_img_paint;
+                if DYNAMIC_FTLE {
+                    ftle_img_paint = Paint::image(
+                        state.ftle_cells_imgs
+                            [(state.current_time % FTLE_PERIOD).div_euclid(TIME_PER_FTLE) as usize],
+                        0.0,
+                        0.0,
+                        DISPLAY_WIDTH,
+                        DISPLAY_HEIGHT,
+                        0.0,
+                        1.0,
+                    );
+                } else {
+                    ftle_img_paint = Paint::image(
+                        state.ftle_cells_imgs[0],
+                        0.0,
+                        0.0,
+                        DISPLAY_WIDTH,
+                        DISPLAY_HEIGHT,
+                        0.0,
+                        1.0,
+                    );
+                }
 
                 let mut ftle_rect = Path::new();
                 ftle_rect.rect(0.0, 0.0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
@@ -522,11 +605,8 @@ impl ApplicationHandler for App {
                     stroke_paint.set_line_width(5.0);
                     state.canvas.stroke_path(&mut circle, &stroke_paint);
 
-                    let (vx, vy) = velocity_field(
-                        particle.x,
-                        particle.y,
-                        state.app_start.elapsed().as_secs_f32(),
-                    );
+                    let (vx, vy) =
+                        velocity_field(particle.x, particle.y, state.current_time as f32);
                     particle.x += vx * dt;
                     particle.y += vy * dt;
                 }
