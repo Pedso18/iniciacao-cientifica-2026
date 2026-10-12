@@ -18,15 +18,27 @@ use winit::{
     window::{Window, WindowAttributes, WindowId},
 };
 
-const AMOUNT_OF_PARTICLES: i32 = 1000;
-const GRID_COLS: f32 = 80.0;
-const GRID_ROWS: f32 = GRID_COLS/2.0;
+//display settings
+const ZOOM_SCALE: f32 = 300.0;
+const DISPLAY_OFFSET_X: f32 = ZOOM_SCALE / 3.0;
+const DISPLAY_OFFSET_Y: f32 = ZOOM_SCALE / 3.0;
+const DISPLAY_WIDTH: f32 = ZOOM_SCALE / 150.0 * 400.0;
+const DISPLAY_HEIGHT: f32 = ZOOM_SCALE / 150.0 * 250.0;
 
+//particle settings
+const AMOUNT_OF_PARTICLES: i32 = 50000;
 const CENTER_SPAWN_X: f32 = 1.0;
-const X_AMPLITUDE: f32 = 0.9;
+const X_AMPLITUDE: f32 = 1.0;
 const CENTER_SPAWN_Y: f32 = 0.5;
-const Y_AMPLITUDE: f32 = 0.45;
+const Y_AMPLITUDE: f32 = 0.5;
 
+//ftle settings
+const GRID_COLS: f32 = 50.0;
+const GRID_ROWS: f32 = GRID_COLS/2.0;
+const GRID_CALC_T0: f32 = 0.0;
+const GRID_CALC_TF: f32 = 10.0;
+
+//simulation settings
 const TIME_BETWEEN_SAMPLES: f32 = 0.1; //in seconds
 
 #[derive(Clone, Copy, Debug)]
@@ -229,6 +241,7 @@ fn precompute_ftle_grid(t0: f32, t_f: f32) -> Vec<FtleCell> {
     let mut values = vec![0.0; (GRID_COLS * GRID_ROWS) as usize];
     let mut max_val: f32 = 0.0;
 
+    let mut counter = 0;
     for row in 0..GRID_ROWS as i32 {
         let y = y_min + (row as f32 + 0.5) * dy;
         for col in 0..GRID_COLS as i32 {
@@ -243,15 +256,17 @@ fn precompute_ftle_grid(t0: f32, t_f: f32) -> Vec<FtleCell> {
             if ftle > max_val {
                 max_val = ftle;
             }
+            counter += 1;
+
+            if counter % 1000 == 0 {
+                println!("precompute process is now {:.2}% done", counter as f32/(GRID_COLS*GRID_ROWS)*100.0);
+            }
         }
     }
 
     println!("FTLE concluído. Maior valor encontrado: {:.4}", max_val);
 
     let mut cells = Vec::with_capacity((GRID_COLS * GRID_ROWS) as usize);
-    let scale = 150.0;
-    let offset_x = 50.0;
-    let offset_y = 50.0;
 
     for row in 0..(GRID_ROWS as i32) {
         let y = y_min + row as f32 * dy;
@@ -260,10 +275,10 @@ fn precompute_ftle_grid(t0: f32, t_f: f32) -> Vec<FtleCell> {
             let val = values[(row * GRID_COLS as i32 + col) as usize];
 
             cells.push(FtleCell {
-                screen_x: x * scale + offset_x,
-                screen_y: y * scale + offset_y,
-                cell_w: dx * scale,
-                cell_h: dy * scale,
+                screen_x: x * ZOOM_SCALE + DISPLAY_OFFSET_X,
+                screen_y: y * ZOOM_SCALE + DISPLAY_OFFSET_Y,
+                cell_w: dx * ZOOM_SCALE,
+                cell_h: dy * ZOOM_SCALE,
                 color: turbo_heat_map(val, max_val),
             });
         }
@@ -314,10 +329,10 @@ fn draw_deformation_gradient(canvas: &mut Canvas<OpenGl>, t: f32, t0: f32) {
     for deformation_value in deformation_values {
         let mut square = Path::new();
         square.rect(
-            (pos_x - distance_between_particles / 2.0) * 150.0 + 50.0,
-            (pos_y - distance_between_particles / 2.0) * 150.0 + 50.0,
-            distance_between_particles * 150.0,
-            distance_between_particles * 150.0,
+            (pos_x - distance_between_particles / 2.0) * ZOOM_SCALE + DISPLAY_OFFSET_X,
+            (pos_y - distance_between_particles / 2.0) * ZOOM_SCALE + DISPLAY_OFFSET_Y,
+            distance_between_particles * ZOOM_SCALE,
+            distance_between_particles * ZOOM_SCALE,
         );
         let rgb_values = turbo_heat_map(deformation_value, biggest_value);
         let stroke_paint = Paint::color(Color::rgb(rgb_values.0, rgb_values.1, rgb_values.2));
@@ -341,7 +356,7 @@ impl ApplicationHandler for App {
 
         let window_attributes = WindowAttributes::default()
             .with_title("Iniciação Científica - 2026")
-            .with_inner_size(LogicalSize::new(400.0, 250.0));
+            .with_inner_size(LogicalSize::new(DISPLAY_WIDTH, DISPLAY_HEIGHT));
 
         let template = ConfigTemplateBuilder::new();
         let display_builder = DisplayBuilder::new().with_window_attributes(Some(window_attributes));
@@ -398,7 +413,7 @@ impl ApplicationHandler for App {
             particles: generate_initial_particles(AMOUNT_OF_PARTICLES),
             last_frame: Instant::now(),
             app_start: Instant::now(),
-            ftle_cells: precompute_ftle_grid(0.0, 10.0),
+            ftle_cells: precompute_ftle_grid(GRID_CALC_T0, GRID_CALC_TF),
         });
     }
 
@@ -463,7 +478,7 @@ impl ApplicationHandler for App {
 
                 for particle in &mut state.particles {
                     let mut circle = Path::new();
-                    circle.circle(particle.x * 150.0 + 50.0, particle.y * 150.0 + 50.0, 0.001);
+                    circle.circle(particle.x * ZOOM_SCALE + DISPLAY_OFFSET_X, particle.y * ZOOM_SCALE + DISPLAY_OFFSET_Y, 0.001);
                     // let mut stroke_paint = Paint::color(Color::rgb((particle.x / 2.0 * 255.0) as u8, (particle.y / 1.0 * 255.0) as u8, 125));
                     let mut stroke_paint = Paint::color(Color::rgb(255, 255, 255));
                     stroke_paint.set_line_width(5.0);
